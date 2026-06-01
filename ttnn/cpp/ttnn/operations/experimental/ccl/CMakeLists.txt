@@ -28,6 +28,8 @@ file(
     rms_allgather/device/kernels/*
     send_recv_async/send_async/device/kernels/*
     send_recv_async/recv_async/device/kernels/*
+    send_recv_async/send_direct_async/device/kernels/*
+    send_recv_async/recv_direct_async/device/kernels/*
     slice_reshard_async/device/kernels/*
     strided_all_gather_async/device/kernels/*
     strided_reduce_scatter_async/device/kernels/*
@@ -124,6 +126,12 @@ target_sources(
         send_recv_async/recv_async/recv_async.cpp
         send_recv_async/recv_async/device/recv_async_op_device_operation.cpp
         send_recv_async/recv_async/device/recv_async_op_program_factory.cpp
+        send_recv_async/send_direct_async/send_direct_async.cpp
+        send_recv_async/send_direct_async/device/send_direct_async_op_device_operation.cpp
+        send_recv_async/send_direct_async/device/send_direct_async_op_program_factory.cpp
+        send_recv_async/recv_direct_async/recv_direct_async.cpp
+        send_recv_async/recv_direct_async/device/recv_direct_async_op_device_operation.cpp
+        send_recv_async/recv_direct_async/device/recv_direct_async_op_program_factory.cpp
         neighbor_pad_async/neighbor_pad_async.cpp
         neighbor_pad_async/device/neighbor_pad_async_device_operation.cpp
         neighbor_pad_async/device/neighbor_pad_async_program_factory.cpp
