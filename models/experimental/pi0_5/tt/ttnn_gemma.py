@@ -688,13 +688,6 @@ class GemmaMLPTTNN:
         self.hidden_size = config.width
         self.intermediate_size = config.mlp_dim
 
-        # FUSION: gate and up share the input and K dim, so pre-concat their
-        # weights into one [hidden, 2*mlp] projection. A single matmul then
-        # yields [gate | up]; GELU is applied to the gate half after the split
-        # (see forward). gate_proj/up_proj are kept for the commented-out
-        # unfused path (easy revert).
-        self.gate_up_proj = ttnn.concat([self.gate_proj, self.up_proj], dim=-1)
-
         # Query device grid to size chunks for available cores
         device_grid = device.compute_with_storage_grid_size()
         self.grid_size = (device_grid.x, device_grid.y)
@@ -719,77 +712,6 @@ class GemmaMLPTTNN:
             self._pcfg_grid = (12, 8)
         else:
             self._pcfg_grid = (8, 8)
-
-        # Bench knob: output memory_config of the gate/up/down matmuls.
-        # Default "l1_interleaved" reproduces production behavior byte-for-byte;
-        # the expert-MLP sharding sweep (test_expert_mlp_sharding_sweep.py)
-        # overrides it to compare placements. Format "<loc>_<layout>" where loc
-        # is l1|dram and layout is interleaved|block|width|height.
-        self.output_memcfg_mode = "l1_interleaved"
-
-    _INTERLEAVED_TABLE = {
-        "l1_interleaved": "L1_MEMORY_CONFIG",
-        "dram_interleaved": "DRAM_MEMORY_CONFIG",
-    }
-
-    def _matched_width_memcfg(self, pc, m_padded, n_dim):
-        """Width-sharded L1 MemoryConfig that matches a 1D-mcast matmul's *own*
-        output layout — same core set + shard width the program config uses — so
-        the matmul emits into it natively instead of hitting a grid mismatch.
-
-        The 1D matmul lays per_core_N output-tile columns across used = ceil(
-        n_tiles / per_core_N) cores in row-major order over its compute grid
-        (often a non-rectangular subset, e.g. 64 cores on a 12x6 grid). We
-        reconstruct exactly that core set.
-        """
-        grid = pc.compute_with_storage_grid_size
-        gx = grid.x
-        per_core_N = pc.per_core_N
-        n_tiles = n_dim // 32
-        used = (n_tiles + per_core_N - 1) // per_core_N
-        full_rows, rem = divmod(used, gx)
-        ranges = []
-        if full_rows > 0:
-            ranges.append(ttnn.CoreRange(ttnn.CoreCoord(0, 0), ttnn.CoreCoord(gx - 1, full_rows - 1)))
-        if rem > 0:
-            ranges.append(ttnn.CoreRange(ttnn.CoreCoord(0, full_rows), ttnn.CoreCoord(rem - 1, full_rows)))
-        shard_spec = ttnn.ShardSpec(
-            ttnn.CoreRangeSet(ranges),
-            [m_padded, per_core_N * 32],
-            ttnn.ShardOrientation.ROW_MAJOR,
-        )
-        return ttnn.MemoryConfig(ttnn.TensorMemoryLayout.WIDTH_SHARDED, ttnn.BufferType.L1, shard_spec)
-
-    def _output_memcfgs(self, mode, gate_pcfg, down_pcfg, m_padded):
-        """Return (gate/up memcfg, multiply memcfg, down memcfg) for `mode`.
-
-        Raises NotImplementedError for layouts this matmul can't emit (recorded
-        N/A by the sharding sweep): DRAM-sharded (no predefined DRAM sharded
-        MemoryConfig; create_sharded_memory_config is L1-only per TT-NN docs),
-        and L1 block/height (the expert's small-M MLP runs a 1D width-mcast
-        program config whose native output sharding is width only).
-        """
-        if mode in self._INTERLEAVED_TABLE:
-            mc = getattr(ttnn, self._INTERLEAVED_TABLE[mode])
-            return mc, mc, mc
-        loc, _, layout = mode.partition("_")
-        if loc == "dram":
-            raise NotImplementedError(
-                "DRAM-sharded output unsupported: no predefined DRAM sharded MemoryConfig; "
-                "create_sharded_memory_config is L1-only (TT-NN docs)"
-            )
-        if layout != "width":
-            raise NotImplementedError(
-                f"L1 {layout}-sharded output unsupported here: the expert's small-M MLP uses a "
-                f"1D width-mcast program config, whose native output sharding is width only"
-            )
-        if gate_pcfg is None:
-            raise NotImplementedError("width-sharded output needs a program_config (core_grid fallback active)")
-        gu = self._matched_width_memcfg(gate_pcfg, m_padded, self.intermediate_size)
-        # gate/up emit width-sharded; the multiply reduces the two sharded
-        # products back to interleaved L1, because the down-proj contracts the
-        # mlp_dim (the sharded axis) and so needs an interleaved activation.
-        return gu, ttnn.L1_MEMORY_CONFIG, ttnn.L1_MEMORY_CONFIG
 
     def forward(self, x) -> ttnn.Tensor:
         """
@@ -891,66 +813,34 @@ class GemmaMLPTTNN:
                 self._pcfg_grid[0],
                 self._pcfg_grid[1],
             )
-            # Fused gate+up matmul: N doubles to 2*intermediate. No fused
-            # activation here — GELU is applied to the gate half post-split.
-            gate_up_pcfg = build_matmul_pcfg(
-                m_tiles,
-                k_to_intermediate,
-                2 * n_intermediate,
-                self._pcfg_grid[0],
-                self._pcfg_grid[1],
+
+            common_kwargs = dict(
+                dtype=ttnn.bfloat16,
+                memory_config=ttnn.L1_MEMORY_CONFIG,
             )
 
-            # Output memory_config of the gate/up/down matmuls. Default mode is
-            # L1 interleaved (production); the sharding sweep overrides
-            # self.output_memcfg_mode so the matmul emits directly into the
-            # target layout (gather-free path from the L1-vs-DRAM analysis).
-            mode = getattr(self, "output_memcfg_mode", "l1_interleaved")
-            gu_memcfg, mult_memcfg, down_memcfg = self._output_memcfgs(mode, gate_pcfg, down_pcfg, padded_chunk_size)
-            gu_kwargs = dict(dtype=ttnn.bfloat16, memory_config=gu_memcfg)
-            down_kwargs = dict(dtype=ttnn.bfloat16, memory_config=down_memcfg)
-
-            # === FUSED gate+up projection (gate-up fusion) ===
-            # One matmul reads x_chunk once and produces [gate | up] (N=2*mlp);
-            # GELU is applied to the gate half AFTER the split because a fused
-            # matmul activation would (wrongly) also hit the up half.
-            if gate_up_pcfg is not None:
-                gate_up = ttnn.linear(x_chunk, self.gate_up_proj, program_config=gate_up_pcfg, **gu_kwargs)
+            if gate_pcfg is not None:
+                gate_activated = ttnn.linear(x_chunk, self.gate_proj, program_config=gate_pcfg, **common_kwargs)
             else:
-                gate_up = ttnn.linear(x_chunk, self.gate_up_proj, core_grid=self.core_grid, **gu_kwargs)
+                gate_activated = ttnn.linear(
+                    x_chunk, self.gate_proj, core_grid=self.core_grid, activation="gelu", **common_kwargs
+                )
+            if up_pcfg is not None:
+                up = ttnn.linear(x_chunk, self.up_proj, program_config=up_pcfg, **common_kwargs)
+            else:
+                up = ttnn.linear(x_chunk, self.up_proj, core_grid=self.core_grid, **common_kwargs)
             ttnn.deallocate(x_chunk)
-            inter = self.intermediate_size
-            gate_part = ttnn.slice(gate_up, [0, 0, 0, 0], [batch_size, 1, padded_chunk_size, inter])
-            up = ttnn.slice(gate_up, [0, 0, 0, inter], [batch_size, 1, padded_chunk_size, 2 * inter])
-            ttnn.deallocate(gate_up)
-            gate_activated = ttnn.gelu(gate_part, fast_and_approximate_mode=True)
-            ttnn.deallocate(gate_part)
 
-            # === ORIGINAL separate gate/up matmuls (replaced by the fusion
-            # above; kept for easy revert) ===
-            # if gate_pcfg is not None:
-            #     gate_activated = ttnn.linear(x_chunk, self.gate_proj, program_config=gate_pcfg, **gu_kwargs)
-            # else:
-            #     gate_activated = ttnn.linear(
-            #         x_chunk, self.gate_proj, core_grid=self.core_grid, activation="gelu", **gu_kwargs
-            #     )
-            # if up_pcfg is not None:
-            #     up = ttnn.linear(x_chunk, self.up_proj, program_config=up_pcfg, **gu_kwargs)
-            # else:
-            #     up = ttnn.linear(x_chunk, self.up_proj, core_grid=self.core_grid, **gu_kwargs)
-            # ttnn.deallocate(x_chunk)
-
-            # Element-wise multiply — output matches the gate/up layout so it
-            # feeds the down-proj matmul without a re-layout.
-            hidden_out = ttnn.multiply(gate_activated, up, memory_config=mult_memcfg)
+            # Element-wise multiply (keep on L1 — feeds the down-proj matmul next)
+            hidden_out = ttnn.multiply(gate_activated, up, memory_config=ttnn.L1_MEMORY_CONFIG)
             ttnn.deallocate(gate_activated)
             ttnn.deallocate(up)
 
             # Down projection
             if down_pcfg is not None:
-                output_chunk = ttnn.linear(hidden_out, self.down_proj, program_config=down_pcfg, **down_kwargs)
+                output_chunk = ttnn.linear(hidden_out, self.down_proj, program_config=down_pcfg, **common_kwargs)
             else:
-                output_chunk = ttnn.linear(hidden_out, self.down_proj, core_grid=self.core_grid, **down_kwargs)
+                output_chunk = ttnn.linear(hidden_out, self.down_proj, core_grid=self.core_grid, **common_kwargs)
             ttnn.deallocate(hidden_out)
 
             # Slice back to actual size if padded
@@ -967,13 +857,6 @@ class GemmaMLPTTNN:
             for i in range(1, len(output_chunks)):
                 output = ttnn.concat([output, output_chunks[i]], dim=2, memory_config=ttnn.L1_MEMORY_CONFIG)
                 ttnn.deallocate(output_chunks[i])
-
-        # Sharding sweep: a non-default mode may have emitted a sharded (or DRAM)
-        # output. The block consumes the MLP result as interleaved L1 (residual
-        # add + reshape), so convert back. No-op for the default mode (output is
-        # already L1 interleaved), keeping production byte-identical.
-        if mode != "l1_interleaved":
-            output = ttnn.to_memory_config(output, ttnn.L1_MEMORY_CONFIG)
 
         # Reshape back to 3D if input was 3D
         if was_3d:
