@@ -552,14 +552,15 @@ class Pi0_5ModelTTNN:
     def embed_suffix(self, state, noisy_actions, timestep):
         return self.suffix_embedding.embed_suffix(state, noisy_actions, timestep)
 
-    def sample_actions(
-        self,
-        images: List[torch.Tensor],
-        img_masks: List[torch.Tensor],
-        lang_tokens: torch.Tensor,
-        lang_masks: torch.Tensor,
-        state: Optional[torch.Tensor] = None,
-    ) -> "ttnn.Tensor":
+    def run_prefix(self, images, img_masks, lang_tokens, lang_masks):
+        """PREFIX stage: SigLIP + VLM prefill producing the prefix KV cache.
+
+        Split out of ``sample_actions`` so the prefix and denoise stages can run
+        on separate submeshes with a socket transfer of the KV cache in between
+        (see tests/perf/test_perf_ttnn_full_e2e_socket.py). Returns
+        ``(prefix_kv_cache, upstream_artifacts, batch_size, _keepalive)`` where
+        ``_keepalive`` holds the pre-lift cache alive for the tensors' lifetime.
+        """
         batch_size = lang_tokens.shape[0]
 
         prefix_embs, _, _ = self.embed_prefix(images, img_masks, lang_tokens, lang_masks)
@@ -626,6 +627,23 @@ class Pi0_5ModelTTNN:
                 # prefix_embs.shape[1] is the original (pre-lift) logical length.
                 self._sdpa_attn_mask = self._build_sdpa_phantom_mask(prefix_embs.shape[1])
                 self._sdpa_mask_kv_len = prefix_logical_lifted
+
+        return prefix_kv_cache, upstream_artifacts, batch_size, _prefix_kv_cache_original
+
+    def run_denoise(
+        self,
+        prefix_kv_cache,
+        upstream_artifacts,
+        batch_size,
+        state: Optional[torch.Tensor] = None,
+    ) -> "ttnn.Tensor":
+        """SUFFIX stage: the flow-matching denoise loop over the prefix KV cache.
+
+        Consumes the artifacts produced by ``run_prefix`` — when this runs on a
+        different submesh, ``prefix_kv_cache``/``upstream_artifacts`` are the
+        socket-received copies that live on the local (suffix) submesh.
+        """
+        keep_padded_expert = batch_size == 1
 
         num_steps = self.denoise_config.num_steps
         timesteps = [1.0 - i / num_steps for i in range(num_steps + 1)]
@@ -764,6 +782,20 @@ class Pi0_5ModelTTNN:
             x_t_ttnn = ttnn.slice(x_t_ttnn, [0, 0, 0], [1, ah, self.config.action_dim])
 
         return x_t_ttnn
+
+    def sample_actions(
+        self,
+        images: List[torch.Tensor],
+        img_masks: List[torch.Tensor],
+        lang_tokens: torch.Tensor,
+        lang_masks: torch.Tensor,
+        state: Optional[torch.Tensor] = None,
+    ) -> "ttnn.Tensor":
+        """Full single-device inference: prefix prefill then the denoise loop."""
+        prefix_kv_cache, upstream_artifacts, batch_size, _keepalive = self.run_prefix(
+            images, img_masks, lang_tokens, lang_masks
+        )
+        return self.run_denoise(prefix_kv_cache, upstream_artifacts, batch_size, state)
 
     @classmethod
     def from_pretrained(
