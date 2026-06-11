@@ -36,6 +36,7 @@ def open_galaxy_mesh(
     enable_fabric: bool = False,
     l1_small_size: Optional[int] = None,
     open_spare: bool = False,
+    fabric_config=None,
 ):
     """Open the parent 8x4 mesh, carve into 3 (or 4) heterogeneous submeshes
     per Option C layout.
@@ -62,8 +63,13 @@ def open_galaxy_mesh(
     """
     parent_shape = ttnn.MeshShape(*layout.parent_mesh_shape)
 
+    # FABRIC_1D suffices for intra-row/col point_to_point (within-stage hops),
+    # but inter-submesh MeshSockets to NON-adjacent chips (e.g. KV migration
+    # prefill (2,0) -> denoise (2,3), 3 cols apart) need full 2D routing —
+    # FABRIC_1D raises "no forwarding direction". Callers using sockets pass
+    # fabric_config=ttnn.FabricConfig.FABRIC_2D. Default stays FABRIC_1D.
     if enable_fabric:
-        ttnn.set_fabric_config(ttnn.FabricConfig.FABRIC_1D)
+        ttnn.set_fabric_config(fabric_config if fabric_config is not None else ttnn.FabricConfig.FABRIC_1D)
 
     open_kwargs = {"mesh_shape": parent_shape}
     if l1_small_size is not None:
