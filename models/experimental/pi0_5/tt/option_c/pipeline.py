@@ -28,6 +28,7 @@ side-by-side with Option B's `StageTimings`.
 
 from __future__ import annotations
 
+import os
 import time
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
@@ -56,6 +57,10 @@ class StageTimingsC:
     stage_2_denoise_ms: float = 0.0
     transport_2_to_host_ms: float = 0.0
     total_ms: float = 0.0
+
+    # Which transport carried the prefill->denoise KV hand-off:
+    # "host_bounce" | "socket:fifo" | "socket:direct".
+    kv_transport_kind: str = ""
 
     # Per-Euler-step timings (length == denoise_steps), so we can see
     # cold-step vs warm-step costs.
@@ -495,7 +500,18 @@ class Pi0_5PipelineC:
             denoise_micro = (
                 self.stage_2.micro_submeshes if self.stage_2 is not None and self.stage_2.layer_paired_l1 else None
             )
-            self.kv_migrator.migrate_layer_paired(per_layer_kv, denoise_micro_submeshes=denoise_micro)
+            # Inter-submesh socket path (prefill micro -> denoise micro), opt-in
+            # via PI0_OC_TRANSPORT=socket. Requires layer-paired prefill (KV on
+            # per-chip micro-submeshes) + fabric-enabled parent mesh. Falls back
+            # to host-bounce otherwise.
+            prefill_micro = getattr(self.stage_1, "micro_submeshes", None)
+            use_socket = os.environ.get("PI0_OC_TRANSPORT") == "socket"
+            if use_socket and prefill_micro is not None and denoise_micro is not None:
+                op_name = self.kv_migrator.migrate_layer_paired_socket(per_layer_kv, prefill_micro, denoise_micro)
+                t.kv_transport_kind = f"socket:{op_name}"
+            else:
+                self.kv_migrator.migrate_layer_paired(per_layer_kv, denoise_micro_submeshes=denoise_micro)
+                t.kv_transport_kind = "host_bounce"
             prefix_kv_on_denoise = self.kv_migrator.as_list(self.config.vlm_config.depth)
             t.kv_migration_ms = (time.perf_counter() - t0) * 1000
 

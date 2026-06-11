@@ -151,6 +151,82 @@ def send_shard_via_p2p_multihop(
     return hop2
 
 
+# ---------------------------------------------------------------------- #
+# D2D transport via MeshSocket (inter-submesh)                            #
+# ---------------------------------------------------------------------- #
+#
+# Sockets move a tensor between two SEPARATE submeshes of the same parent
+# MeshDevice (cf. point_to_point, which moves a shard *within* one
+# parent-mesh tensor). In Option C this is the inter-stage hand-off:
+# prefill micro-submesh (1,1) -> denoise micro-submesh (1,1).
+#
+# Requires fabric enabled at parent-mesh open (open_galaxy_mesh(enable_fabric=True)).
+# The send/recv ops are injected so the same plumbing serves both the FIFO
+# path (ttnn.experimental.send_async/recv_async) and the direct-write path
+# (ttnn.experimental.send_direct_async/recv_direct_async). Both share the same
+# signature: send_op(src, send_socket); recv_op(pre_allocated_dst, recv_socket).
+
+
+def build_socket_pair(
+    sender_submesh, recv_submesh, num_connections: int = 1, page_size_bytes: int = 8192, core_base: int = 0
+):
+    """Create one MeshSocket pair between two equal-shape submeshes.
+
+    Sender cores live in row 0, receiver cores in row 1 so the two sets never
+    overlap (the socket runtime forbids a core appearing in two connections of
+    one socket). One connection per mesh coord; for the (1,1) micro-submeshes
+    used by Option C's KV migration that is a single sender/receiver core pair.
+
+    The FIFO holds payload (FIFO path) or just the handshake/completion token
+    (direct path); page_size_bytes*4 is a safe L1 FIFO size for both.
+    """
+    sender_cores = [ttnn.CoreCoord(core_base + i, 0) for i in range(num_connections)]
+    recv_cores = [ttnn.CoreCoord(core_base + i, 1) for i in range(num_connections)]
+    connections = []
+    for coord in ttnn.MeshCoordinateRange(sender_submesh.shape):
+        for s, r in zip(sender_cores, recv_cores):
+            connections.append(ttnn.SocketConnection(ttnn.MeshCoreCoord(coord, s), ttnn.MeshCoreCoord(coord, r)))
+    socket_mem = ttnn.SocketMemoryConfig(ttnn.BufferType.L1, page_size_bytes * 4)
+    socket_config = ttnn.SocketConfig(connections, socket_mem)
+    return ttnn.create_socket_pair(sender_submesh, recv_submesh, socket_config)
+
+
+def transfer_via_socket(
+    src_tensor: "ttnn.Tensor",
+    dst_landing: "ttnn.Tensor",
+    send_socket,
+    recv_socket,
+    sender_submesh,
+    recv_submesh,
+    send_op,
+    recv_op,
+) -> "ttnn.Tensor":
+    """Stream one tensor src->dst over a pre-built socket pair, then sync both
+    submeshes so the payload is guaranteed present. `dst_landing` must be
+    pre-allocated on recv_submesh with a spec matching src_tensor.
+
+    `send_op`/`recv_op` select FIFO (send_async/recv_async) vs direct-write
+    (send_direct_async/recv_direct_async) — both async, same signature.
+    """
+    send_op(src_tensor, send_socket)
+    recv_op(dst_landing, recv_socket)
+    ttnn.synchronize_device(sender_submesh)
+    ttnn.synchronize_device(recv_submesh)
+    return dst_landing
+
+
+def resolve_socket_ops(prefer: str = "fifo"):
+    """Pick (send_op, recv_op). `prefer` ('fifo'|'direct') is overridable by the
+    PI0_OC_SOCKET_OP env var. Falls back to FIFO if the direct ops are not built
+    into this ttnn (the FIFO branch). Returns (send_op, recv_op, name)."""
+    import os
+
+    choice = os.environ.get("PI0_OC_SOCKET_OP", prefer).lower()
+    if choice == "direct" and hasattr(ttnn.experimental, "send_direct_async"):
+        return ttnn.experimental.send_direct_async, ttnn.experimental.recv_direct_async, "direct"
+    return ttnn.experimental.send_async, ttnn.experimental.recv_async, "fifo"
+
+
 def send_per_chip_activation_via_host(src_tensor: "ttnn.Tensor", src_chip_idx: int, dst_submesh) -> "ttnn.Tensor":
     """Move a single chip's shard from a source submesh to a (replicated)
     placement on a destination submesh, via host DRAM.

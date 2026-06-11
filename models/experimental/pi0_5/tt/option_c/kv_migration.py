@@ -42,7 +42,13 @@ from .stages import (
     PREFILL_SUBMESH_OFFSET,
     PREFILL_SUBMESH_SHAPE,
 )
-from .transport import send_per_chip_activation_via_host, send_shard_via_p2p
+from .transport import (
+    build_socket_pair,
+    resolve_socket_ops,
+    send_per_chip_activation_via_host,
+    send_shard_via_p2p,
+    transfer_via_socket,
+)
 
 
 class KVMigration:
@@ -63,6 +69,11 @@ class KVMigration:
     def __init__(self, denoise_submesh) -> None:
         self.denoise_submesh = denoise_submesh
         self.migrated_kv: Dict[int, Tuple["ttnn.Tensor", "ttnn.Tensor"]] = {}
+        # Lazily-built socket state for migrate_layer_paired_socket. Keyed by
+        # VLM layer index → dict(send_socket, recv_socket, k_dst, v_dst). Sockets
+        # + landing buffers are the expensive part, so build once and reuse
+        # across inferences.
+        self._socket_state: Dict[int, dict] = {}
 
     @staticmethod
     def denoise_chip_for_vlm_layer(layer_idx: int) -> int:
@@ -199,6 +210,73 @@ class KVMigration:
             k_migrated = send_shard_via_p2p(k_parent, src_coord, dst_coord)
             v_migrated = send_shard_via_p2p(v_parent, src_coord, dst_coord)
             self.migrated_kv[layer_idx] = (k_migrated, v_migrated)
+
+    # ------------------------------------------------------------------ #
+    # Inter-submesh socket path (prefill micro -> denoise micro)           #
+    # ------------------------------------------------------------------ #
+
+    def migrate_layer_paired_socket(
+        self,
+        prefill_kv_per_layer: List[Optional[Tuple["ttnn.Tensor", "ttnn.Tensor"]]],
+        prefill_micro_submeshes: List,
+        denoise_micro_submeshes: List,
+        page_size_bytes: int = 8192,
+    ) -> str:
+        """Layer-paired KV migration over MeshSockets — the inter-submesh d2d path.
+
+        For each VLM layer i (whose K/V live on the (1,1) prefill micro-submesh
+        `prefill_micro_submeshes[i]`), stream K then V over a socket to the (1,1)
+        denoise micro-submesh `denoise_micro_submeshes[i // EXPERT_LAYERS_PER_DENOISE_CHIP]`.
+
+        FIFO (send_async/recv_async) vs direct-write (send_direct_async/
+        recv_direct_async) is selected by `resolve_socket_ops` (env
+        PI0_OC_SOCKET_OP). Sockets + landing buffers are built once on the first
+        call (keyed by layer) and reused thereafter.
+
+        PRECONDITION: parent mesh opened with fabric enabled
+        (open_galaxy_mesh(enable_fabric=True)); prefill in layer-paired mode so
+        each layer's K/V sits alone on its micro-submesh (shard 0).
+
+        Returns the op name actually used ("fifo"|"direct") for logging.
+        """
+        send_op, recv_op, op_name = resolve_socket_ops()
+        for layer_idx, kv in enumerate(prefill_kv_per_layer):
+            if kv is None:
+                continue
+            k_src, v_src = kv
+            d = self.denoise_chip_for_vlm_layer(layer_idx)
+            sender = prefill_micro_submeshes[layer_idx]
+            recv = denoise_micro_submeshes[d]
+
+            st = self._socket_state.get(layer_idx)
+            if st is None:
+                # Distinct cores per layer-within-group so the (up to
+                # EXPERT_LAYERS_PER_DENOISE_CHIP) sockets landing on the same
+                # denoise chip don't collide on the same receiver core.
+                core_base = layer_idx % EXPERT_LAYERS_PER_DENOISE_CHIP
+                send_socket, recv_socket = build_socket_pair(
+                    sender, recv, num_connections=1, page_size_bytes=page_size_bytes, core_base=core_base
+                )
+                k_dst = ttnn.allocate_tensor_on_device(k_src.spec, recv)
+                v_dst = ttnn.allocate_tensor_on_device(v_src.spec, recv)
+                st = {
+                    "send_socket": send_socket,
+                    "recv_socket": recv_socket,
+                    "k_dst": k_dst,
+                    "v_dst": v_dst,
+                    "sender": sender,
+                    "recv": recv,
+                }
+                self._socket_state[layer_idx] = st
+
+            transfer_via_socket(
+                k_src, st["k_dst"], st["send_socket"], st["recv_socket"], st["sender"], st["recv"], send_op, recv_op
+            )
+            transfer_via_socket(
+                v_src, st["v_dst"], st["send_socket"], st["recv_socket"], st["sender"], st["recv"], send_op, recv_op
+            )
+            self.migrated_kv[layer_idx] = (st["k_dst"], st["v_dst"])
+        return op_name
 
     def get(self, layer_idx: int) -> Tuple["ttnn.Tensor", "ttnn.Tensor"]:
         return self.migrated_kv[layer_idx]
