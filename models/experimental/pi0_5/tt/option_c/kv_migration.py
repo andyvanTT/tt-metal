@@ -221,6 +221,7 @@ class KVMigration:
         prefill_micro_submeshes: List,
         denoise_micro_submeshes: List,
         page_size_bytes: int = 8192,
+        socket_ops: Optional[Tuple] = None,
     ) -> str:
         """Layer-paired KV migration over MeshSockets — the inter-submesh d2d path.
 
@@ -237,9 +238,14 @@ class KVMigration:
         (open_galaxy_mesh(enable_fabric=True)); prefill in layer-paired mode so
         each layer's K/V sits alone on its micro-submesh (shard 0).
 
-        Returns the op name actually used ("fifo"|"direct") for logging.
+        `socket_ops`, when given, is an explicit (send_op, recv_op, name) tuple
+        that overrides `resolve_socket_ops()` — lets one process benchmark both
+        FIFO and direct in turn. Returns the op name actually used.
         """
-        send_op, recv_op, op_name = resolve_socket_ops()
+        if socket_ops is not None:
+            send_op, recv_op, op_name = socket_ops
+        else:
+            send_op, recv_op, op_name = resolve_socket_ops()
         for layer_idx, kv in enumerate(prefill_kv_per_layer):
             if kv is None:
                 continue
