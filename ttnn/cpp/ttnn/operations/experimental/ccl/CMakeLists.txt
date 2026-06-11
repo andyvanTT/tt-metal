@@ -30,6 +30,8 @@ file(
     rms_allgather/device/kernels/*
     send_recv_async/send_async/device/kernels/*
     send_recv_async/recv_async/device/kernels/*
+    send_recv_async/send_direct_async/device/kernels/*
+    send_recv_async/recv_direct_async/device/kernels/*
     slice_reshard_async/device/kernels/*
     strided_all_gather_async/device/kernels/*
     strided_reduce_scatter_async/device/kernels/*
@@ -52,6 +54,23 @@ target_sources(
         FILES ${kernels}
     PRIVATE
         ${TTNN_OP_EXPERIMENTAL_CCL_SRCS}
+)
+
+# Keep the ported direct-write socket op sources OUT of the unity build. They
+# carry a `using namespace tt::constants;` (via send_recv shared headers) that,
+# when concatenated into a unity blob with moe_compute_program_factory.cpp,
+# makes that file's anonymous-namespace TILE_WIDTH ambiguous against
+# tt::constants::TILE_WIDTH. Excluding them restores the original unity bucketing.
+set_source_files_properties(
+    send_recv_async/send_direct_async/send_direct_async.cpp
+    send_recv_async/send_direct_async/device/send_direct_async_op_device_operation.cpp
+    send_recv_async/send_direct_async/device/send_direct_async_op_program_factory.cpp
+    send_recv_async/recv_direct_async/recv_direct_async.cpp
+    send_recv_async/recv_direct_async/device/recv_direct_async_op_device_operation.cpp
+    send_recv_async/recv_direct_async/device/recv_direct_async_op_program_factory.cpp
+    PROPERTIES
+        SKIP_UNITY_BUILD_INCLUSION
+            ON
 )
 
 target_include_directories(ttnn_op_experimental_ccl PRIVATE ${FixmeOpIncDirs})

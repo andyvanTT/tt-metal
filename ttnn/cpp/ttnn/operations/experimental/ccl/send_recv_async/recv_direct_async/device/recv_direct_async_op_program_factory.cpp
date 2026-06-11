@@ -17,8 +17,6 @@
 #include <tt-metalium/tt_align.hpp>
 #include "ttnn/operations/experimental/ccl/send_recv_async/send_recv_utils.hpp"
 
-using namespace tt::constants;
-
 namespace ttnn::experimental::prim {
 
 RecvDirectAsyncMeshWorkloadFactory::cached_mesh_workload_t RecvDirectAsyncMeshWorkloadFactory::create_mesh_workload(
