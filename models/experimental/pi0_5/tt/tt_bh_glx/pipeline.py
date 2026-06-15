@@ -1,7 +1,8 @@
 # SPDX-FileCopyrightText: 2025 Tenstorrent USA, Inc.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Pi0_5GLXPipeline — end-to-end sample_actions across the 28-chip BH Galaxy
+"""
+Pi0_5GLXPipeline — end-to-end sample_actions across the 28-chip BH Galaxy
 host-bounce pipeline.
 
 Composition:
