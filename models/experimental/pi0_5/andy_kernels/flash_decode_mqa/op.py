@@ -240,7 +240,7 @@ class FlashDecodeMQA:
 
     # ------------------------------------------------------------------ M2e
     @staticmethod
-    def op_attn_full(q, k, v, scaler, mask, out) -> ttnn.Tensor:
+    def op_attn_full(q, k, v, scaler, mask, out, stage=0) -> ttnn.Tensor:
         """Milestone 2e: single-core full-row attention over the real Sk (Skt tiles)
         with additive mask. Q pre-scaled by 1/sqrt(d). The per-core kernel M3 K-splits.
         q (32,d); k (Sk,d); v (Sk,dv); scaler (32,32) 1.0; mask (32,Sk); out (32,dv)."""
@@ -277,7 +277,7 @@ class FlashDecodeMQA:
             kernel_source=f"{_KDIR}/fd_attn_mt_compute.cpp",
             source_type=ttnn.KernelDescriptor.SourceType.FILE_PATH,
             core_ranges=cores,
-            compile_time_args=[dt, vt, Skt],
+            compile_time_args=[dt, vt, Skt, stage],
             config=ttnn.ComputeConfigDescriptor(
                 math_fidelity=ttnn.MathFidelity.HiFi4,
                 math_approx_mode=False,

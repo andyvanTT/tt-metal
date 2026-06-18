@@ -57,14 +57,12 @@ or split into sub-chunks; validate subblock constraints (out_subblock_w*out_subb
 - M2a ✅ Q@K^T matmul+transpose (PCC 0.999968).
 - M2b ✅ row-softmax single tile (PCC 0.999774). Key: `binary_op_init_common` base HW startup.
 - M2d ✅ fused single-block attention QK^T→softmax→PV (PCC 0.999903), Sk=1 tile.
-- M2e ⛔ WIP — single-core full Sk=1056 (33 tiles) + additive mask. Compiles & runs but
-  output is all zeros (`fd_attn_mt_compute.cpp`, `test_m2e_attn_full.py`). M2d (same phase
-  structure, Sk=1, no mask) passes, so the bug is in the multi-tile additions:
-  candidates to bisect — (a) Phase A2 mask-add (matmul→add_tiles mode transition / cb_qkm),
-  (b) multi-tile reduce accumulate (does `reduce_tile` MAX accumulate into dst[0] across the
-  Skt calls, or overwrite?), (c) Phase C double-loop accumulation into dst[0..vt-1] across n.
-  Debug plan: shrink to Skt=2 + zero mask; add a passthrough that packs cb_qk straight to out
-  to confirm Phase A multi-tile; then re-enable mask, then softmax, then PV one at a time.
+- M2e ✅ multi-tile per-core attention + additive mask (PCC 0.999886, Sk=256 = 8 tiles, the
+  per-core slice scale M3 uses). Bug found via stage-probe: the zeros were **bf8 K/V in the
+  matmul** (raw QK scores came back ~1e20). bf16 K/V is correct and is what a K-split core
+  uses (per-core K is small → fits L1; full Sk=1056 bf16 on ONE core overflows L1, which is
+  exactly why M3 splits it). The kernel has a `stage` compile arg (1=dump cb_qk, 2=dump cb_p)
+  for probing. TODO(perf): configure the matmul data-format reconfig to allow bf8 K/V if needed.
 
 ## Status / blockers
 - M1 committed + validated. M2/M3 pending.

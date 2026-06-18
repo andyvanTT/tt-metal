@@ -41,6 +41,7 @@ void kernel_main() {
     constexpr uint32_t dt = get_compile_time_arg_val(0);   // QK contraction tiles (head_dim/32)
     constexpr uint32_t vt = get_compile_time_arg_val(1);   // PV output tiles (head_dim_v/32)
     constexpr uint32_t Skt = get_compile_time_arg_val(2);  // K sequence tiles
+    constexpr uint32_t stage = get_compile_time_arg_val(3);  // debug: 0=full, 1=dump cb_qk, 2=dump cb_p
 
     binary_op_init_common(cb_q, cb_k, cb_out);
     cb_wait_front(cb_q, dt);
@@ -63,6 +64,22 @@ void kernel_main() {
         tile_regs_release();
     }
     cb_push_back(cb_qk, Skt);
+
+    if (stage == 1) {  // dump first vt tiles of cb_qk (raw scores) to out
+        cb_wait_front(cb_qk, Skt);
+        copy_tile_init(cb_qk);
+        cb_reserve_back(cb_out, vt);
+        for (uint32_t d = 0; d < vt; ++d) {
+            tile_regs_acquire();
+            copy_tile(cb_qk, d, 0);
+            tile_regs_commit();
+            tile_regs_wait();
+            pack_tile(0, cb_out);
+            tile_regs_release();
+        }
+        cb_push_back(cb_out, vt);
+        return;
+    }
 
     // ---- Phase A2: cb_qkm = cb_qk + mask ----
     cb_wait_front(cb_qk, Skt);
@@ -152,6 +169,22 @@ void kernel_main() {
         tile_regs_release();
     }
     cb_push_back(cb_p, Skt);
+
+    if (stage == 2) {  // dump first vt tiles of cb_p (softmax probs) to out
+        cb_wait_front(cb_p, Skt);
+        copy_tile_init(cb_p);
+        cb_reserve_back(cb_out, vt);
+        for (uint32_t d = 0; d < vt; ++d) {
+            tile_regs_acquire();
+            copy_tile(cb_p, d, 0);
+            tile_regs_commit();
+            tile_regs_wait();
+            pack_tile(0, cb_out);
+            tile_regs_release();
+        }
+        cb_push_back(cb_out, vt);
+        return;
+    }
 
     // ---- Phase C: O[:,dv] = sum_n P[n] @ V[n,dv] -> cb_out[vt] ----
     cb_wait_front(cb_p, Skt);
