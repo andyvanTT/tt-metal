@@ -297,3 +297,66 @@ class FlashDecodeMQA:
         )
         ttnn.generic_op([q, k, v, scaler, mask, out], prog)
         return out
+
+    # ------------------------------------------------------------------ M3a
+    @staticmethod
+    def op_partial(q, k, v, scaler, mask, out, mout, lout):
+        """Milestone 3a: partial attention over one K-slice. Emits un-normalized
+        O_c (out, vt tiles), m_c (mout, 1 tile), l_c (lout, 1 tile) for a cross-core
+        online-softmax combine. q (32,d); k/v (Sk_slice,*); mask (32,Sk_slice)."""
+        cb_q, cb_k, cb_v, cb_scaler, cb_mask = 0, 1, 2, 3, 4
+        cb_out, cb_mout, cb_lout = 16, 17, 18
+        dt = q.shape[-1] // 32
+        vt = v.shape[-1] // 32
+        Skt = k.shape[-2] // 32
+        cores = q.memory_config().shard_spec.grid
+
+        cbq = ttnn.cb_descriptor_from_sharded_tensor(cb_q, q)
+        cbk = ttnn.cb_descriptor_from_sharded_tensor(cb_k, k)
+        cbv = ttnn.cb_descriptor_from_sharded_tensor(cb_v, v)
+        cbsc = ttnn.cb_descriptor_from_sharded_tensor(cb_scaler, scaler)
+        cbm = ttnn.cb_descriptor_from_sharded_tensor(cb_mask, mask)
+        cbo = ttnn.cb_descriptor_from_sharded_tensor(cb_out, out)
+        cbmo = ttnn.cb_descriptor_from_sharded_tensor(cb_mout, mout)
+        cblo = ttnn.cb_descriptor_from_sharded_tensor(cb_lout, lout)
+        scratch = [
+            FlashDecodeMQA._scratch_cb(24, cores, Skt),  # cb_qk
+            FlashDecodeMQA._scratch_cb(25, cores, 1),  # cb_max
+            FlashDecodeMQA._scratch_cb(26, cores, Skt),  # cb_exp
+            FlashDecodeMQA._scratch_cb(27, cores, 1),  # cb_sum
+            FlashDecodeMQA._scratch_cb(30, cores, Skt),  # cb_qkm
+        ]
+
+        reader = ttnn.KernelDescriptor(
+            kernel_source=f"{_KDIR}/fd_attn_mt_reader.cpp",
+            source_type=ttnn.KernelDescriptor.SourceType.FILE_PATH,
+            core_ranges=cores,
+            compile_time_args=[cb_q, cb_k, cb_v, cb_scaler, cb_mask, dt, vt, Skt],
+            config=ttnn.ReaderConfigDescriptor(),
+        )
+        compute = ttnn.KernelDescriptor(
+            kernel_source=f"{_KDIR}/fd_partial_compute.cpp",
+            source_type=ttnn.KernelDescriptor.SourceType.FILE_PATH,
+            core_ranges=cores,
+            compile_time_args=[dt, vt, Skt],
+            config=ttnn.ComputeConfigDescriptor(
+                math_fidelity=ttnn.MathFidelity.HiFi4,
+                math_approx_mode=False,
+                fp32_dest_acc_en=False,
+                dst_full_sync_en=False,
+            ),
+        )
+        writer = ttnn.KernelDescriptor(
+            kernel_source=f"{_KDIR}/fd_partial_writer.cpp",
+            source_type=ttnn.KernelDescriptor.SourceType.FILE_PATH,
+            core_ranges=cores,
+            compile_time_args=[cb_out, vt, cb_mout, cb_lout],
+            config=ttnn.WriterConfigDescriptor(),
+        )
+        prog = ttnn.ProgramDescriptor(
+            kernels=[reader, writer, compute],
+            cbs=[cbq, cbk, cbv, cbsc, cbm, cbo, cbmo, cblo, *scratch],
+            semaphores=[],
+        )
+        ttnn.generic_op([q, k, v, scaler, mask, out, mout, lout], prog)
+        return out, mout, lout
