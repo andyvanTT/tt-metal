@@ -87,3 +87,47 @@ class FlashDecodeMQA:
         )
         ttnn.generic_op([in_tensor, out_tensor], prog)
         return out_tensor
+
+    # ------------------------------------------------------------------ M2a
+    @staticmethod
+    def op_qkt(q: ttnn.Tensor, k: ttnn.Tensor, out: ttnn.Tensor) -> ttnn.Tensor:
+        """Milestone 2a: S = Q @ K^T for one (32x32) score block, single core,
+        contracting over head_dim. Validates matmul+transpose in-kernel before
+        softmax/PV. q,k: (32, head_dim) L1 TILE single-core shards; out: (32,32)."""
+        cb_q, cb_k, cb_out = 0, 1, 16
+        dt = q.shape[-1] // 32  # contraction tiles (head_dim / 32)
+        cores = q.memory_config().shard_spec.grid
+
+        cbq = ttnn.cb_descriptor_from_sharded_tensor(cb_q, q)
+        cbk = ttnn.cb_descriptor_from_sharded_tensor(cb_k, k)
+        cbo = ttnn.cb_descriptor_from_sharded_tensor(cb_out, out)
+
+        reader = ttnn.KernelDescriptor(
+            kernel_source=f"{_KDIR}/fd_qkt_reader.cpp",
+            source_type=ttnn.KernelDescriptor.SourceType.FILE_PATH,
+            core_ranges=cores,
+            compile_time_args=[cb_q, cb_k, dt],
+            config=ttnn.ReaderConfigDescriptor(),
+        )
+        compute = ttnn.KernelDescriptor(
+            kernel_source=f"{_KDIR}/fd_qkt_compute.cpp",
+            source_type=ttnn.KernelDescriptor.SourceType.FILE_PATH,
+            core_ranges=cores,
+            compile_time_args=[cb_q, cb_k, cb_out, dt],
+            config=ttnn.ComputeConfigDescriptor(
+                math_fidelity=ttnn.MathFidelity.HiFi4,
+                math_approx_mode=False,
+                fp32_dest_acc_en=False,
+                dst_full_sync_en=False,
+            ),
+        )
+        writer = ttnn.KernelDescriptor(
+            kernel_source=f"{_KDIR}/fd_qkt_writer.cpp",
+            source_type=ttnn.KernelDescriptor.SourceType.FILE_PATH,
+            core_ranges=cores,
+            compile_time_args=[cb_out, 1],
+            config=ttnn.WriterConfigDescriptor(),
+        )
+        prog = ttnn.ProgramDescriptor(kernels=[reader, writer, compute], cbs=[cbq, cbk, cbo], semaphores=[])
+        ttnn.generic_op([q, k, out], prog)
+        return out
