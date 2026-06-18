@@ -52,6 +52,20 @@ or split into sub-chunks; validate subblock constraints (out_subblock_w*out_subb
   or a tree reduce. This is the genuinely novel kernel and the main M3 risk.
 - Fan out the 8 heads across the remaining grid (8 heads × K-split cores), staying ≤120 cores, K/V in L1.
 
+## Build log (validated on HW, committed locally on single_optim)
+- M1 ✅ plumbing (exact copy).
+- M2a ✅ Q@K^T matmul+transpose (PCC 0.999968).
+- M2b ✅ row-softmax single tile (PCC 0.999774). Key: `binary_op_init_common` base HW startup.
+- M2d ✅ fused single-block attention QK^T→softmax→PV (PCC 0.999903), Sk=1 tile.
+- M2e ⛔ WIP — single-core full Sk=1056 (33 tiles) + additive mask. Compiles & runs but
+  output is all zeros (`fd_attn_mt_compute.cpp`, `test_m2e_attn_full.py`). M2d (same phase
+  structure, Sk=1, no mask) passes, so the bug is in the multi-tile additions:
+  candidates to bisect — (a) Phase A2 mask-add (matmul→add_tiles mode transition / cb_qkm),
+  (b) multi-tile reduce accumulate (does `reduce_tile` MAX accumulate into dst[0] across the
+  Skt calls, or overwrite?), (c) Phase C double-loop accumulation into dst[0..vt-1] across n.
+  Debug plan: shrink to Skt=2 + zero mask; add a passthrough that packs cb_qk straight to out
+  to confirm Phase A multi-tile; then re-enable mask, then softmax, then PV one at a time.
+
 ## Status / blockers
 - M1 committed + validated. M2/M3 pending.
 - PUSH BLOCKED: forwarded SSH agent not reachable in the autonomous shell (origin = github-andy alias);
