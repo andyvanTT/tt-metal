@@ -131,3 +131,59 @@ class FlashDecodeMQA:
         prog = ttnn.ProgramDescriptor(kernels=[reader, writer, compute], cbs=[cbq, cbk, cbo], semaphores=[])
         ttnn.generic_op([q, k, out], prog)
         return out
+
+    # ------------------------------------------------------------------ M2b
+    @staticmethod
+    def _scratch_cb(idx, cores, n_tiles=1, dtype=ttnn.bfloat16):
+        """A non-tensor-backed L1 scratch circular buffer of n_tiles 32x32 tiles."""
+        tile_bytes = 32 * 32 * 2  # bf16
+        fmt = ttnn.CBFormatDescriptor(buffer_index=idx, data_format=dtype, page_size=tile_bytes)
+        return ttnn.CBDescriptor(total_size=tile_bytes * n_tiles, core_ranges=cores, format_descriptors=[fmt])
+
+    @staticmethod
+    def op_softmax(s: ttnn.Tensor, scaler: ttnn.Tensor, out: ttnn.Tensor) -> ttnn.Tensor:
+        """Milestone 2b: row-softmax of one (32x32) score tile, single core.
+        s: (32,32) scores; scaler: (32,32) of 1.0 (reduce multiplier); out: (32,32)."""
+        cb_s, cb_scaler, cb_out = 0, 1, 16
+        cb_max, cb_exp, cb_sum, cb_recip = 24, 25, 26, 27
+        cores = s.memory_config().shard_spec.grid
+
+        cbs = ttnn.cb_descriptor_from_sharded_tensor(cb_s, s)
+        cbsc = ttnn.cb_descriptor_from_sharded_tensor(cb_scaler, scaler)
+        cbo = ttnn.cb_descriptor_from_sharded_tensor(cb_out, out)
+        scratch = [
+            FlashDecodeMQA._scratch_cb(cb_max, cores),
+            FlashDecodeMQA._scratch_cb(cb_exp, cores),
+            FlashDecodeMQA._scratch_cb(cb_sum, cores),
+            FlashDecodeMQA._scratch_cb(cb_recip, cores),
+        ]
+
+        reader = ttnn.KernelDescriptor(
+            kernel_source=f"{_KDIR}/fd_softmax_reader.cpp",
+            source_type=ttnn.KernelDescriptor.SourceType.FILE_PATH,
+            core_ranges=cores,
+            compile_time_args=[cb_s, cb_scaler],
+            config=ttnn.ReaderConfigDescriptor(),
+        )
+        compute = ttnn.KernelDescriptor(
+            kernel_source=f"{_KDIR}/fd_softmax_compute.cpp",
+            source_type=ttnn.KernelDescriptor.SourceType.FILE_PATH,
+            core_ranges=cores,
+            compile_time_args=[],
+            config=ttnn.ComputeConfigDescriptor(
+                math_fidelity=ttnn.MathFidelity.HiFi4,
+                math_approx_mode=False,
+                fp32_dest_acc_en=False,
+                dst_full_sync_en=False,
+            ),
+        )
+        writer = ttnn.KernelDescriptor(
+            kernel_source=f"{_KDIR}/fd_qkt_writer.cpp",
+            source_type=ttnn.KernelDescriptor.SourceType.FILE_PATH,
+            core_ranges=cores,
+            compile_time_args=[cb_out, 1],
+            config=ttnn.WriterConfigDescriptor(),
+        )
+        prog = ttnn.ProgramDescriptor(kernels=[reader, writer, compute], cbs=[cbs, cbsc, cbo, *scratch], semaphores=[])
+        ttnn.generic_op([s, scaler, out], prog)
+        return out
