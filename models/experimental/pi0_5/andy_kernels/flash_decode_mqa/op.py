@@ -306,9 +306,11 @@ class FlashDecodeMQA:
         online-softmax combine. q (32,d); k/v (Sk_slice,*); mask (32,Sk_slice)."""
         cb_q, cb_k, cb_v, cb_scaler, cb_mask = 0, 1, 2, 3, 4
         cb_out, cb_mout, cb_lout = 16, 17, 18
-        dt = q.shape[-1] // 32
-        vt = v.shape[-1] // 32
-        Skt = k.shape[-2] // 32
+        # Per-core tile counts from the SHARD shape so this works both single-core
+        # (M3a: shard == full tensor) and multi-core (M3b: K height-sharded slice).
+        dt = q.memory_config().shard_spec.shape[-1] // 32
+        vt = v.memory_config().shard_spec.shape[-1] // 32
+        Skt = k.memory_config().shard_spec.shape[-2] // 32
         cores = q.memory_config().shard_spec.grid
 
         cbq = ttnn.cb_descriptor_from_sharded_tensor(cb_q, q)
