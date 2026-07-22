@@ -52,6 +52,10 @@ def to_device_kv(
     mapper = ttnn.ReplicateTensorToMesh(mesh_device)
     out = []
     for k, v in kv_host:
+        # prefill emits [B, seq, n_kv_heads, head_dim] (meta-reference order); the TT KV
+        # cache and ttnn.fill_cache expect [B, n_kv_heads, seq, head_dim]. Swap heads<->seq.
+        k = k.permute(0, 2, 1, 3).contiguous()
+        v = v.permute(0, 2, 1, 3).contiguous()
         k = _pad_seq_to_tile(k.to(torch.bfloat16))
         v = _pad_seq_to_tile(v.to(torch.bfloat16))
         # bf16 row-major to device == the "plain bf16 on the wire" DMA step.
