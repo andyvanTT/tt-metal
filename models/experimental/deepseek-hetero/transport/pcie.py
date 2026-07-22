@@ -23,15 +23,19 @@ from transport.base import KVTransport
 class PcieTransport(KVTransport):
     name = "pcie"
 
-    def __init__(self, model_args: ModelArgs, device: str = "cpu", instruct: bool = False):
+    def __init__(self, model_args: ModelArgs, device: str = "cpu", instruct: bool = False, state_dict=None):
         """
         model_args: shared config/weights object (same one the decode side uses).
         device:     where HF prefill runs — "cpu" (v1 default) or "cuda".
         instruct:   apply the chat template when encoding the prompt.
+        state_dict: optional shared meta state dict (avoids re-reading the checkpoint).
         """
         self.model_args = model_args
         self.device = device
         self.instruct = instruct
+        self.state_dict = state_dict
 
     def deliver(self, prompt: str) -> PrefillResult:
-        return prefill_hf.run_prefill(self.model_args, prompt, device=self.device, instruct=self.instruct)
+        return prefill_hf.run_prefill(
+            self.model_args, prompt, device=self.device, instruct=self.instruct, state_dict=self.state_dict
+        )
