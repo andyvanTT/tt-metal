@@ -56,31 +56,48 @@ def main():
     os.environ.setdefault("HF_MODEL", args.model)
     logger.info(f"HETERO run: model={args.model} prefill={args.prefill_device} transport={args.transport}")
 
+    # 1. --- TRANSPORT SWAP POINT ------------------------------------------------------
+    # Prefill + KV handoff run FIRST, before open_mesh_device(). tt-metal's device init
+    # resets the ethernet cores (tearing down the eth_data_rx ERISC RX ring), so a wire
+    # transport that receives into the P150 must complete its transfer before the mesh
+    # device is opened. deliver() reads the KV back into HOST tensors (res.kv), so the
+    # subsequent device open can freely reinitialize the chip. Uses a host-only ModelArgs
+    # (mesh_device=None) — prefill only needs config/tokenizer/reference weights, no device.
+    # Downstream (bridge -> inject -> decode) is identical regardless of transport.
+    from models.tt_transformers.tt.model_config import ModelArgs
+
+    host_model_args = ModelArgs(
+        None,  # no mesh device: host/CPU reference path for prefill
+        instruct=args.instruct,
+        max_batch_size=1,
+        max_seq_len=args.max_seq_len,
+    )
+    transport = make_transport(
+        args.transport,
+        model_args=host_model_args,
+        device=args.prefill_device,
+        instruct=args.instruct,
+        state_dict=None,
+    )
+    # ----------------------------------------------------------------------------------
+
+    t0 = time.time()
+    res = transport.deliver(args.prompt)
+    t_prefill = time.time() - t0
+    logger.info(f"Prefill+transport: {t_prefill*1000:.0f} ms (prompt_len={res.prompt_len})")
+
+    # Release the transport's own device handle (if any) BEFORE opening the mesh device,
+    # so tt-metal and the transport don't hold two UMD contexts on the same chip at once.
+    close = getattr(transport, "close", None)
+    if callable(close):
+        close()
+
+    # 2. Now open the device and build the Tenstorrent decode model + (non-paged) KV cache.
     mesh_device = ttnn.open_mesh_device(ttnn.MeshShape(1, 1))
     try:
-        # 1. Build the Tenstorrent decode model + (non-paged) KV cache.
         tt = decode_driver.build_tt_model(
             mesh_device, max_seq_len=args.max_seq_len, max_batch_size=1, instruct=args.instruct
         )
-
-        # 2. --- TRANSPORT SWAP POINT --------------------------------------------------
-        # This single factory call is the only thing that changes between the current
-        # PCIe path and the future BlueField/Ethernet path. Everything downstream
-        # (bridge -> inject -> decode) is identical regardless of transport.
-        transport = make_transport(
-            args.transport,
-            model_args=tt.model_args,
-            device=args.prefill_device,
-            instruct=args.instruct,
-            state_dict=tt.state_dict,
-        )
-        # ------------------------------------------------------------------------------
-
-        # 3. Prefill on the producer side; receive the per-layer KV handoff on the TT host.
-        t0 = time.time()
-        res = transport.deliver(args.prompt)
-        t_prefill = time.time() - t0
-        logger.info(f"Prefill+transport: {t_prefill*1000:.0f} ms (prompt_len={res.prompt_len})")
 
         # 4. Bridge host KV -> device bf16 TILE (on-device tilize).
         t0 = time.time()

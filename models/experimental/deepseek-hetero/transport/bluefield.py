@@ -55,6 +55,7 @@ HDR = struct.Struct("<IHHII")  # magic, stream_id, flags, byte_offset, payload_l
 NIC_RX_CTRL_ADDR = 0x7C200
 # nic_rx_ctrl_t field byte-offsets (host-written control + fw status).
 OFF_DST_MODE, OFF_DRAM_X, OFF_DRAM_Y, OFF_DRAM_LO, OFF_DRAM_HI = 0, 4, 8, 12, 16
+OFF_MAGIC = 20  # fw liveness signature (fw writes MAGIC here once eth_data_rx is initialized)
 OFF_STATE, OFF_BYTES = 24, 28  # magic@20, state@24, bytes_received@28
 STATE_DONE = 3
 
@@ -112,6 +113,15 @@ class BluefieldTransport(KVTransport):
             self._umd = devs[list(cd.get_all_chips())[0]]
         return self._umd
 
+    def close(self):
+        """Release the tt_umd device handle so it doesn't coexist with a ttnn mesh device.
+
+        Called by run_hetero after deliver() and before open_mesh_device(): the KV is
+        already in host tensors, so this transport no longer needs the chip. Two UMD
+        contexts on one P150 (this handle + tt-metal's cluster) can conflict.
+        """
+        self._umd = None
+
     def _w32(self, x, y, addr, val):
         self._dev().noc_write32(x, y, addr, val & 0xFFFFFFFF)
 
@@ -130,6 +140,25 @@ class BluefieldTransport(KVTransport):
         """Point the ERISC receiver at the DRAM target (dst_mode=DRAM)."""
         ex, ey = self.eth_core
         dx, dy, daddr = self.dram
+        # Preflight: is eth_data_rx actually alive on this core? open_mesh_device() resets the
+        # chip (incl. eth cores) before deliver() runs, which can wipe hand-loaded ERISC firmware.
+        # A missing magic here means the firmware is gone -> reload it AFTER open_mesh_device,
+        # not a wire/link problem.
+        magic = self._r32(ex, ey, NIC_RX_CTRL_ADDR + OFF_MAGIC)
+        if magic != MAGIC:
+            logger.warning(
+                f"eth_data_rx firmware NOT detected on eth{self.eth_core}: "
+                f"magic@0x{NIC_RX_CTRL_ADDR + OFF_MAGIC:X}=0x{magic:08X}, expected 0x{MAGIC:08X}. "
+                f"The chip was likely reset by open_mesh_device() — (re)load the ERISC firmware "
+                f"after the mesh device is open."
+            )
+        else:
+            logger.info(f"eth_data_rx firmware alive on eth{self.eth_core} (magic=0x{magic:08X})")
+        # Clear fw status fields before arming so _wait_done() can't observe a stale DONE /
+        # bytes_received left over from a prior transfer or firmware init (see the 131072 B
+        # "128 KiB constant" symptom). Do this first, before DST_MODE arms the receiver.
+        self._w32(ex, ey, NIC_RX_CTRL_ADDR + OFF_STATE, 0)
+        self._w32(ex, ey, NIC_RX_CTRL_ADDR + OFF_BYTES, 0)
         self._w32(ex, ey, NIC_RX_CTRL_ADDR + OFF_DRAM_X, dx)
         self._w32(ex, ey, NIC_RX_CTRL_ADDR + OFF_DRAM_Y, dy)
         self._w32(ex, ey, NIC_RX_CTRL_ADDR + OFF_DRAM_LO, daddr & 0xFFFFFFFF)
@@ -137,20 +166,44 @@ class BluefieldTransport(KVTransport):
         self._w32(ex, ey, NIC_RX_CTRL_ADDR + OFF_DST_MODE, 1)  # arm DRAM mode last
         logger.info(f"armed eth{self.eth_core} -> DRAM {self.dram[:2]}@0x{daddr:X} for {nbytes} B")
 
+    def _netdev_stat(self, name: str) -> int:
+        try:
+            with open(f"/sys/class/net/{self.netdev}/statistics/{name}") as f:
+                return int(f.read().strip())
+        except OSError:
+            return -1
+
     def _send(self, blob: bytes):
         """Frame the blob and TX it as broadcast L2 frames (needs CAP_NET_RAW)."""
+        # Link/interface preflight: a raw-L2 pipe must be up with carrier and NOT NM-managed.
+        operstate, carrier = "?", -1
+        try:
+            with open(f"/sys/class/net/{self.netdev}/operstate") as f:
+                operstate = f.read().strip()
+            with open(f"/sys/class/net/{self.netdev}/carrier") as f:
+                carrier = int(f.read().strip())
+        except OSError as e:
+            logger.warning(f"could not read link state for {self.netdev}: {e}")
+        logger.info(f"netdev {self.netdev}: operstate={operstate} carrier={carrier}")
+
         src = _mac_of(self.netdev)
         eth = BROADCAST + src + struct.pack("!H", ETHERTYPE)
         s = socket.socket(socket.AF_PACKET, socket.SOCK_RAW, socket.htons(ETHERTYPE))
         s.bind((self.netdev, 0))
+        tx0 = self._netdev_stat("tx_packets")
         off = 0
         n = len(blob)
+        nframes = 0
         while off < n:
             m = min(self.frame_bytes, n - off)
             eot = FLAG_EOT if (off + m >= n) else 0
             s.send(eth + HDR.pack(MAGIC, 1, eot, off, m) + blob[off : off + m])
             off += m
+            nframes += 1
         s.close()
+        tx1 = self._netdev_stat("tx_packets")
+        # If tx_packets didn't advance by ~nframes, the frames never left this host NIC.
+        logger.info(f"sent {nframes} frame(s); netdev tx_packets {tx0} -> {tx1} (delta={tx1 - tx0})")
 
     def _wait_done(self, timeout_s: float = 10.0):
         ex, ey = self.eth_core
@@ -159,7 +212,18 @@ class BluefieldTransport(KVTransport):
             if self._r32(ex, ey, NIC_RX_CTRL_ADDR + OFF_STATE) == STATE_DONE:
                 return self._r32(ex, ey, NIC_RX_CTRL_ADDR + OFF_BYTES)
             time.sleep(0.005)
-        raise TimeoutError("eth_data_rx did not reach DONE — check link/firmware/netdev")
+        # Diagnostic: read what the ERISC actually observed. bytes==0 => no frames reached the
+        # receiver at all (link/switch/netdev problem, not framing); bytes>0 with state!=DONE =>
+        # frames arrived but the EOT/DONE condition was never satisfied (framing/EOT problem).
+        state = self._r32(ex, ey, NIC_RX_CTRL_ADDR + OFF_STATE)
+        got = self._r32(ex, ey, NIC_RX_CTRL_ADDR + OFF_BYTES)
+        rx_ok = self._netdev_stat("rx_packets")
+        raise TimeoutError(
+            f"eth_data_rx did not reach DONE (state={state}, fw bytes_received={got}, "
+            f"netdev rx_packets={rx_ok}) — bytes_received=0 means no frames reached the ERISC "
+            f"(check link carrier / netdev / NM-unmanaged / switch); bytes>0 means frames arrived "
+            f"but EOT/DONE never triggered (framing mismatch)"
+        )
 
     def deliver(self, prompt: str) -> PrefillResult:
         # 1. Producer: HF prefill -> per-layer (K,V), first token, prompt length.
@@ -181,7 +245,13 @@ class BluefieldTransport(KVTransport):
             f"({len(blob)*8/dt/1e9:.2f} Gb/s); fw counted {got} B"
         )
         if got != len(blob):
-            raise RuntimeError(f"DRAM received {got} B, expected {len(blob)}")
+            # The fw bytes_received counter has been unreliable (reports a fixed 128 KiB constant
+            # on some builds). Don't fail on it alone — the byte-level DRAM readback+verify below
+            # is the real source of truth for whether the KV landed correctly.
+            logger.warning(
+                f"fw bytes_received={got} B != expected {len(blob)} B; "
+                f"relying on DRAM readback+verify instead of the fw counter"
+            )
 
         # 4. Read the KV back from DRAM (v1 host readback) and reconstruct tensors.
         dx, dy, daddr = self.dram
