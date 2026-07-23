@@ -20,6 +20,7 @@
 #include <climits>
 #include <cstdlib>
 #include <fstream>
+#include <sstream>
 #include <algorithm>
 #include <set>
 #include <unordered_map>
@@ -378,9 +379,12 @@ void erase_one_sided_connections(PhysicalSystemDescriptor& psd, const std::vecto
                     dst_edges.erase(dst_it);
                 }
             }
-            if (dst_edges.empty()) {
-                asic_group.erase(src_it);
-            }
+            // Intentionally keep the src_asic entry even when its edge list becomes empty. Every
+            // chip is seeded into asic_connectivity_graph with an empty edge list during discovery
+            // (see run_local_discovery), and physical mesh-node enumeration keys off membership in
+            // this graph (get_asics_connected_to_host). Erasing the last edge of a standalone chip
+            // (e.g. one whose only link was a dropped non-TT NIC connection) would make the chip
+            // vanish as a mesh node and yield a 0-node physical topology.
         }
 
         // Remove from exit_node_connection_table
@@ -458,11 +462,30 @@ void validate_graphs(PhysicalSystemDescriptor& psd) {
                     continue;  // no need to check further
                 }
 
-                // Global connections must cross hosts
-                TT_FATAL(
-                    src_host != dst_host,
-                    "Physical Discovery Error: Hostnames for connections marked as global should be different. "
-                    "Please reset the system and try again.");
+                // A "global" connection whose endpoints resolve to the same host is not a real
+                // cross-host fabric link -- e.g. a Blackhole ERISC trained to a non-TT NIC
+                // (BlueField/Mellanox) that UMD reports as PORT_UP. It can never be a usable
+                // fabric peer, so drop it instead of aborting discovery.
+                if (src_host == dst_host) {
+                    log_warning(
+                        tt::LogMetal,
+                        "Physical Discovery: Dropping {} global connection(s) that resolve back to the "
+                        "local host {} (likely a non-TT NIC link). ASIC {} (Tray {} Location {}) -> "
+                        "ASIC {} (Tray {} Location {}).",
+                        eth_conns.size(),
+                        src_host,
+                        src_asic,
+                        src_desc.tray_id,
+                        src_desc.asic_location,
+                        dst_asic,
+                        dst_desc.tray_id,
+                        dst_desc.asic_location);
+                    for (const auto& eth_conn : eth_conns) {
+                        connections_to_drop.push_back(
+                            {host, src_host, dst_host, src_asic, dst_asic, eth_conn.src_chan, eth_conn.dst_chan});
+                    }
+                    continue;  // skip per-connection validation for this dropped edge
+                }
 
                 // Validate each global ethernet connection.
                 for (const auto& eth_conn : eth_conns) {
@@ -626,6 +649,34 @@ bool is_bh_galaxy_rev_c(tt::umd::ClusterDescriptor& cluster_desc) {
     return revision_bits >= 3;
 }
 
+// Ethernet channels to omit from fabric discovery entirely, from the comma-separated env var
+// TT_METAL_FABRIC_EXCLUDE_ETH_CHANS (empty/unset => exclude nothing). A non-TT ethernet core —
+// e.g. a Blackhole ERISC running custom firmware that trains a link to a standard NIC such as a
+// BlueField-3 — reports PORT_UP, so UMD enumerates it as an ethernet connection even though the
+// peer is not a Tenstorrent ASIC. That connection has no valid remote TT chip: it resolves back
+// to the local host and trips discovery's "global connection must cross hosts" check. Listing the
+// NIC's local eth channel here removes it from the graph before any validation runs. Parsed once.
+const std::set<uint32_t>& get_excluded_eth_channels() {
+    static const std::set<uint32_t> excluded = [] {
+        std::set<uint32_t> chans;
+        if (const char* env = std::getenv("TT_METAL_FABRIC_EXCLUDE_ETH_CHANS")) {
+            std::stringstream ss(env);
+            std::string tok;
+            while (std::getline(ss, tok, ',')) {
+                try {
+                    if (!tok.empty()) {
+                        chans.insert(static_cast<uint32_t>(std::stoul(tok)));
+                    }
+                } catch (const std::exception&) {
+                    // Ignore malformed tokens rather than aborting discovery.
+                }
+            }
+        }
+        return chans;
+    }();
+    return excluded;
+}
+
 }  // namespace
 
 namespace discovery_impl {
@@ -689,6 +740,15 @@ PhysicalSystemDescriptor run_local_discovery(
             hostname_key};
     };
 
+    // Ethernet channels to omit from discovery (non-TT NIC links); usually empty.
+    const auto& excluded_eth_chans = get_excluded_eth_channels();
+    if (!excluded_eth_chans.empty()) {
+        log_info(
+            tt::LogMetal,
+            "Fabric discovery excluding {} ethernet channel(s) via TT_METAL_FABRIC_EXCLUDE_ETH_CHANS.",
+            excluded_eth_chans.size());
+    }
+
     for (const auto& [chip_id, unique_id] : chip_unique_ids) {
         add_local_asic_descriptor(AsicID{unique_id}, chip_id);
         asic_graph[AsicID{unique_id}] = {};
@@ -700,6 +760,10 @@ PhysicalSystemDescriptor run_local_discovery(
         std::unordered_map<ChipId, size_t> visited_dst;
         // Populate ASIC Graph for Current Host
         for (const auto& [chan, dst] : conn) {
+            // Skip channels owned by a non-TT NIC link (see get_excluded_eth_channels()).
+            if (excluded_eth_chans.contains(static_cast<uint32_t>(chan))) {
+                continue;
+            }
             auto dst_chip = std::get<0>(dst);
             auto dst_chan = std::get<1>(dst);
             if (!visited_dst.contains(dst_chip)) {
@@ -726,6 +790,10 @@ PhysicalSystemDescriptor run_local_discovery(
         }
         std::unordered_map<AsicID, size_t> visited_dst;
         for (const auto& [eth_chan, remote_info] : eth_link_info) {
+            // Skip channels owned by a non-TT NIC link (see get_excluded_eth_channels()).
+            if (excluded_eth_chans.contains(static_cast<uint32_t>(eth_chan))) {
+                continue;
+            }
             auto dst_unique_id = AsicID{std::get<0>(remote_info)};
             auto dst_chan = std::get<1>(remote_info);
             if (!visited_dst.contains(dst_unique_id)) {
