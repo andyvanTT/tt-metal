@@ -11,7 +11,11 @@ transport-agnostic: it always receives a ``PrefillResult``.
 Swap the whole handoff with one parameter via ``make_transport(name, ...)``:
   - ``pcie``      : v1 — prefill runs in-process; host tensors handed over directly
                     (PCIe host→device DMA happens later, on ttnn.from_torch/fill_cache).
-  - ``bluefield`` : future — KV bytes received over RDMA/Ethernet into a TT host buffer.
+  - ``bluefield`` : KV bytes over AF_PACKET/broadcast frames into the eth_data_rx
+                    ERISC firmware's DRAM staging.
+  - ``ttlink``    : KV over TT-link packet mode (unicast → RXQ2, EtherType 0x88b5)
+                    via the ``ttlink`` package's Pipeline (GPU → BF3 → P150,
+                    v1 L1 host-drain sink).
 """
 
 from __future__ import annotations
@@ -53,4 +57,8 @@ def make_transport(name: str, **kwargs) -> KVTransport:
         from transport.bluefield import BluefieldTransport
 
         return BluefieldTransport(**kwargs)
-    raise ValueError(f"unknown transport {name!r}; expected 'pcie' or 'bluefield'")
+    if name == "ttlink":
+        from transport.ttlink import TTLinkTransport
+
+        return TTLinkTransport(**kwargs)
+    raise ValueError(f"unknown transport {name!r}; expected 'pcie', 'bluefield' or 'ttlink'")
