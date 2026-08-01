@@ -13,7 +13,9 @@ Run (from the tt-metal root, TT venv active, TT_METAL_HOME set):
         --prefill-device cpu --transport pcie --max-tokens 32
 
 The ``--transport`` value selects the KV handoff mechanism at ONE place
-(``make_transport`` below): ``pcie`` (v1, in-process host tensors) or ``bluefield``
+(``make_transport`` below): ``pcie`` (v1, in-process host tensors), ``bluefield``
+(AF_PACKET frames -> eth_data_rx ERISC -> DRAM staging), or ``ttlink`` (TT-link
+packet mode via the ttlink package: GPU -> BF3 -> P150 L1, host-drain sink).
 (future, RDMA/Ethernet). Nothing else in the pipeline changes when it is swapped.
 """
 
@@ -43,7 +45,7 @@ def parse_args():
     p.add_argument("--model", default=os.environ.get("HF_MODEL", "Qwen/Qwen2.5-0.5B-Instruct"))
     p.add_argument("--prompt", default="Once upon a time")
     p.add_argument("--prefill-device", default="cpu", choices=["cpu", "cuda"], help="where HF prefill runs")
-    p.add_argument("--transport", default="pcie", choices=["pcie", "bluefield"], help="KV handoff mechanism")
+    p.add_argument("--transport", default="pcie", choices=["pcie", "bluefield", "ttlink"], help="KV handoff mechanism")
     p.add_argument("--max-tokens", type=int, default=32)
     p.add_argument("--max-seq-len", type=int, default=1024)
     p.add_argument("--instruct", action="store_true", help="apply the chat template to the prompt")
