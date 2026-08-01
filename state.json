@@ -1,25 +1,25 @@
 {
-  "last_run": "2026-07-31T08:24:57Z",
-  "last_run_id": "30616025705",
+  "last_run": "2026-08-01T07:54:06Z",
+  "last_run_id": "30690591778",
   "monthly_activity_issue": {
-    "temporary_id": "aw_monthly_2026_07",
-    "title": "[repo-assist] Monthly Activity 2026-07",
-    "month": "2026-07"
+    "temporary_id": "aw_monthly_2026_08",
+    "title": "[repo-assist] Monthly Activity 2026-08",
+    "month": "2026-08"
   },
   "issue_cursor": null,
   "pr_cursor": null,
   "task_last_run": {
-    "task1_triage": "2026-07-31",
-    "task2_investigate": "2026-07-31",
-    "task3_fix": "2026-07-31",
-    "task4_improvements": "2026-07-31",
-    "task5_maintain_prs": "2026-07-31",
-    "task6_stale_prs": "2026-07-31",
-    "task7_welcome": "2026-07-31",
-    "task8_monthly": "2026-07-31"
+    "task1_triage": "2026-08-01",
+    "task2_investigate": "2026-08-01",
+    "task3_fix": "2026-08-01",
+    "task4_improvements": "2026-08-01",
+    "task5_maintain_prs": "2026-08-01",
+    "task6_stale_prs": "2026-08-01",
+    "task7_welcome": "2026-08-01",
+    "task8_monthly": "2026-08-01"
   },
   "commented_issues": {},
   "welcomed_contributors": [],
   "fix_attempts": {},
-  "notes": "Fork with no open issues or PRs. Monthly activity issue created for 2026-07 (temporary_id: aw_monthly_2026_07). Will need to find the real issue number on next run."
+  "notes": "Fork with no open issues or PRs. Monthly activity issue created for 2026-08 (temporary_id: aw_monthly_2026_08). Previous month (2026-07) issue was also a temporary_id that may not have resolved."
 }
