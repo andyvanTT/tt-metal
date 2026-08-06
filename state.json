@@ -1,25 +1,25 @@
 {
-  "last_run": "2026-08-05T08:10:38Z",
-  "last_run_id": "30987849033",
+  "last_run": "2026-08-06T08:09:09Z",
+  "last_run_id": "31083614603",
   "monthly_activity_issue": {
-    "temporary_id": "aw_monthly_aug26",
+    "temporary_id": "aw_monthly_aug26b",
     "title": "[repo-assist] Monthly Activity 2026-08",
     "month": "2026-08"
   },
   "issue_cursor": null,
   "pr_cursor": null,
   "task_last_run": {
-    "task1_triage": "2026-08-05",
-    "task2_investigate": "2026-08-05",
-    "task3_fix": "2026-08-05",
-    "task4_improvements": "2026-08-05",
-    "task5_maintain_prs": "2026-08-05",
-    "task6_stale_prs": "2026-08-05",
-    "task7_welcome": "2026-08-05",
-    "task8_monthly": "2026-08-05"
+    "task1_triage": "2026-08-06",
+    "task2_investigate": "2026-08-06",
+    "task3_fix": "2026-08-06",
+    "task4_improvements": "2026-08-06",
+    "task5_maintain_prs": "2026-08-06",
+    "task6_stale_prs": "2026-08-06",
+    "task7_welcome": "2026-08-06",
+    "task8_monthly": "2026-08-06"
   },
   "commented_issues": {},
   "welcomed_contributors": [],
   "fix_attempts": {},
-  "notes": "Fork with no open issues or PRs. Monthly activity issue created for 2026-08 with temporary_id aw_monthly_aug26. Run 2026-08-04: no issues/PRs. Run 2026-08-05: no issues/PRs, created monthly issue."
+  "notes": "Fork with no open issues or PRs. Monthly activity issue re-created for 2026-08 on 2026-08-06 (temporary_id aw_monthly_aug26b). All runs: no open items found."
 }
