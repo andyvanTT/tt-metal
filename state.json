@@ -1,6 +1,6 @@
 {
-  "last_run": "2026-08-08T13:15:11Z",
-  "last_run_id": "31259045946",
+  "last_run": "2026-08-08T19:01:08Z",
+  "last_run_id": "31273299355",
   "monthly_activity_issue": {
     "temporary_id": "aw_monthly_aug26",
     "title": "[repo-assist] Monthly Activity 2026-08",
@@ -21,5 +21,5 @@
   "commented_issues": {},
   "welcomed_contributors": [],
   "fix_attempts": {},
-  "notes": "Fork confirmed empty again (0 issues, 0 PRs) at run 31259045946. Prior monthly issue (temp_id aw_monthly_aug26) from run 31245807433 was not found via search on this run either (0 results, no issues at all in fork) so recreated it fresh again this run with same temp_id/title. If this keeps recurring, the create_issue calls may not be persisting/searchable in this fork's index, or search API lag - re-check on next run before recreating again. All tasks 1-7: nothing to do (no issues/PRs exist)."
+  "notes": "Fork confirmed empty again (0 issues, 0 PRs) at run 31273299355 - same as prior several runs. No monthly activity issue found via search (fork appears to have no issues at all, consistent with prior findings that create_issue/search may not be persisting or fork lacks issue support). Not recreating it again this run since no new activity to report and prior recreation attempts did not resolve visibility - deferring to noop. All tasks 1-7: nothing to do (no issues/PRs exist in this fork)."
 }
