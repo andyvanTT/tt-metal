@@ -37,10 +37,10 @@ def test_apply_lofi_lm_head_sets_math_fidelity():
         def __init__(self):
             self.compute_kernel_config = None
 
-    fake = FakeLMHead()
-    apply_lofi_lm_head(fake)
-    assert fake.compute_kernel_config is not None
-    assert fake.compute_kernel_config.math_fidelity == ttnn.MathFidelity.LoFi
+    fake_model = type("FakeModel", (), {"lm_head": FakeLMHead()})()
+    apply_lofi_lm_head(fake_model)
+    assert fake_model.lm_head.compute_kernel_config is not None
+    assert fake_model.lm_head.compute_kernel_config.math_fidelity == ttnn.MathFidelity.LoFi
 
 
 def test_custom_decoder_config_file():

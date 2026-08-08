@@ -1,21 +1,9 @@
 # SPDX-FileCopyrightText: © 2024 Tenstorrent USA, Inc.
 # SPDX-License-Identifier: Apache-2.0
 
-from models.tt_transformers.tt.model_config import parse_optimizations
+"""Test-local pytest configuration.
 
-
-def pytest_addoption(parser):
-    parser.addoption(
-        "--decoder_config_file",
-        action="store",
-        default=None,
-        type=str,
-        help="Provide a JSON file defining per-decoder precision and fidelity settings",
-    )
-    parser.addoption(
-        "--optimizations",
-        action="store",
-        default=None,
-        type=parse_optimizations,
-        help="Precision and fidelity configuration diffs over default (i.e., accuracy)",
-    )
+Pytest options are registered in the parent ``models/demos/llama_8b/conftest.py``
+so they are available whether tests are run from the repo root or from this
+subdirectory.  This file is intentionally minimal.
+"""
