@@ -137,7 +137,7 @@ class Generator(ModelCapabilitiesMixin, WarmupForwardMixin):
 
         return ret
 
-    def warmup_model_prefill(self, kv_cache, enable_trace, can_sample_on_device, non_greedy_decoding_on_device):
+    def warmup_model_prefill(self, kv_cache, enable_trace, can_sample_on_device, greedy_only: bool = False):
         if self.already_warmed_up_prefill:
             return
         self.already_warmed_up_prefill = True
@@ -185,8 +185,8 @@ class Generator(ModelCapabilitiesMixin, WarmupForwardMixin):
                     if not sampling_parameters_sweeped:
                         sampling_params = self._create_sampling_params(
                             can_sample_on_device=can_sample_on_device,
-                            non_greedy_decoding_on_device=non_greedy_decoding_on_device,
                             batch_size=batch_size,
+                            greedy_only=greedy_only,
                         )
                     else:
                         sampling_params = [None]
@@ -563,7 +563,7 @@ class Generator(ModelCapabilitiesMixin, WarmupForwardMixin):
                 kv_cache=kv_cache,
                 enable_trace=enable_trace,
                 can_sample_on_device=sampling_on_device_enabled,
-                non_greedy_decoding_on_device=sampling_on_device_enabled,
+                greedy_only=not sampling_on_device_enabled,
             )
 
         batch_size, batch_seq_len = tokens.shape
@@ -1330,14 +1330,20 @@ class Generator(ModelCapabilitiesMixin, WarmupForwardMixin):
 
         for i in range(self.data_parallel):
             user_kv_cache = kv_cache[i] if kv_cache is not None else None
-            tt_logits_i, tt_log_probs_i = self.model[i].ttnn_decode_forward(
+            decode_out = self.model[i].ttnn_decode_forward(
                 tt_tokens[i],
                 tt_current_pos[i],
                 rot_mat_idxs=tt_rot_mat_idxs[i],
                 page_table=tt_page_table[i],
                 kv_cache=user_kv_cache,
-                sampling_on_device=sampling_on_device,
+                on_device_logits=sampling_on_device,
             )
+            # on_device_logits=True returns a single tensor; otherwise a
+            # (logits, log_probs) tuple.
+            if isinstance(decode_out, tuple):
+                tt_logits_i, tt_log_probs_i = decode_out
+            else:
+                tt_logits_i, tt_log_probs_i = decode_out, None
             tt_output.append((tt_logits_i, tt_log_probs_i))
 
         return tt_output
@@ -1406,8 +1412,7 @@ class Generator(ModelCapabilitiesMixin, WarmupForwardMixin):
                 self.model[i].ttnn_decode_forward(
                     *model_inputs,
                     kv_cache=user_kv_cache,
-                    sampling_on_device=sampling_on_device,
-                    capture_sampling_trace=split_enabled,
+                    on_device_logits=sampling_on_device,
                 )
             )
             ttnn.end_trace_capture(self.model_args[i].mesh_device, trace_id, cq_id=0)

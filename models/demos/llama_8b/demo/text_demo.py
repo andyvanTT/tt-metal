@@ -14,7 +14,9 @@ corresponding baseline demo, e.g.:
 """
 
 import json
+import os
 
+import pytest
 import torch
 from loguru import logger
 
@@ -23,7 +25,7 @@ import ttnn
 from models.common.sampling import SamplingParams
 from models.demos.llama_8b.tt.factory import create_llama8b_model, load_llama8b_optimizations
 from models.demos.llama_8b.tt.generator import Generator as Llama8bGenerator
-from models.tt_transformers.demo.simple_text_demo import prepare_generator_args, preprocess_inputs_prefill
+from models.tt_transformers.demo.simple_text_demo import load_inputs, prepare_generator_args, preprocess_inputs_prefill
 
 # Replace the baseline model constructor with the demo fork for the duration of
 # the demo.  This lets us reuse the baseline ``prepare_generator_args`` without
@@ -31,6 +33,45 @@ from models.tt_transformers.demo.simple_text_demo import prepare_generator_args,
 tt_common.create_tt_model = create_llama8b_model
 
 
+@pytest.mark.parametrize(
+    "mesh_device",
+    [
+        {
+            "N150": (1, 1),
+            "N300": (1, 2),
+            "N150x4": (1, 4),
+            "T3K": (1, 8),
+            "TG": (8, 4),
+            "P150": (1, 1),
+            "P300": (1, 2),
+            "P150x4": (1, 4),
+            "P150x8": (1, 8),
+            "BHGLX": (8, 4),
+        }.get(os.environ.get("MESH_DEVICE"), (1, 1))
+    ],
+    indirect=True,
+)
+@pytest.mark.parametrize("device_params", [{"fabric_config": True, "num_command_queues": 1}], indirect=True)
+@pytest.mark.parametrize(
+    "input_prompts, instruct, max_seq_len, batch_size, max_generated_tokens, paged_attention, page_params, sampling_params, data_parallel, num_layers, use_prefetcher, use_hf_rope",
+    [
+        (
+            "models/tt_transformers/demo/sample_prompts/input_data_questions_prefill_128.json",
+            True,
+            32768,
+            1,
+            32,
+            True,
+            {"page_block_size": 32, "page_max_num_blocks_per_dp": 1024},
+            {"temperature": 1.0, "top_k": 32, "top_p": 0.9},
+            1,
+            None,
+            False,
+            False,
+        ),
+    ],
+    ids=["Llama-3.1-8B-Instruct"],
+)
 def test_demo_text(
     input_prompts,
     instruct,
@@ -103,11 +144,11 @@ def test_demo_text(
 
     generator = Llama8bGenerator(model, model_args, mesh_device, processor=processor, tokenizer=tokenizer)
 
-    # Minimal single-batch run: tokenize the first prompt and run one prefill
-    # plus ``max_generated_tokens`` decode steps.  This is intentionally
-    # simplified compared to the full baseline demo.
-    if len(input_prompts) == 1:
-        input_prompts = input_prompts * global_batch_size
+    # Load the prompt file and slice to the batch size, matching the baseline
+    # demo (``load_inputs``). Passing the whole file's prompt list with a small
+    # batch_size makes ``preprocess_inputs_prefill`` see every prompt as a
+    # separate user, which breaks the batch-1 decode shard shape.
+    input_prompts, _all_prompts = load_inputs(input_prompts, global_batch_size, instruct)
 
     (
         input_tokens_prefill,
@@ -126,24 +167,35 @@ def test_demo_text(
     )
 
     logger.info("Running forked Llama-8B prefill...")
-    generator.prefill_forward_text(
+    prefill_out = generator.prefill_forward_text(
         input_tokens_prefill_pt,
         page_table=page_table,
         kv_cache=tt_kv_cache,
-        prompt_lens=prefill_lens,
-        empty_slots=list(range(global_batch_size)),
+        prompt_lens=decoding_pos,
         sampling_params=device_sampling_params,
-        start_pos=decoding_pos,
     )
+    # With device sampling enabled, prefill returns (output_tokens, log_probs);
+    # output_tokens is [batch, 1] — the first generated token to feed decode.
+    if isinstance(prefill_out, tuple):
+        prefilled_token = prefill_out[0]
+    else:
+        prefilled_token = torch.argmax(prefill_out, dim=-1)
+    prefilled_token = prefilled_token.view(global_batch_size, 1)
 
     logger.info(f"Running forked Llama-8B decode for {max_generated_tokens} tokens...")
-    for _ in range(max_generated_tokens):
-        generator.decode_forward(
-            tokens=input_tokens_prefill_pt,
-            start_pos=decoding_pos,
+    current_pos = torch.tensor([decoding_pos[b] for b in range(global_batch_size)])
+    out_tok = prefilled_token
+    for iteration in range(max_generated_tokens):
+        decode_out = generator.decode_forward(
+            out_tok,
+            current_pos,
             page_table=page_table,
             kv_cache=tt_kv_cache,
             sampling_params=device_sampling_params,
         )
+        # Device sampling returns (tokens, log_probs); tokens is [batch, 1].
+        next_tok = decode_out[0] if isinstance(decode_out, tuple) else decode_out
+        out_tok = next_tok.view(global_batch_size, 1)
+        current_pos += 1
 
     logger.info("Demo completed.")
