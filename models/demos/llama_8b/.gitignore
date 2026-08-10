@@ -1,0 +1,4 @@
+# Model weights downloaded for this demo (large binary artifacts, never commit).
+# See "Model weights" in README.md for how to fetch them.
+NousResearch/
+*.safetensors

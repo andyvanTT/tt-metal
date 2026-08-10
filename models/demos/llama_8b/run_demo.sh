@@ -4,14 +4,12 @@
 #
 # One-shot runner for the Llama-3.1-8B demo tuning fork.
 #
-# Defaults target a single Blackhole P150 chip and the locally-cached
-# non-gated NousResearch Llama-3.1-8B weights. Override anything with
-# environment variables or the flags below.
+# Defaults to a single Blackhole P150 chip and the local Meta-Llama-3.1-8B
+# weights (no HF token needed). Override knobs via the flags/env vars below.
 #
 # Usage:
-#   ./run_demo.sh                              # single P150 + local NousResearch weights
+#   ./run_demo.sh                              # single P150 + local weights
 #   MESH_DEVICE=P150x4 ./run_demo.sh           # 1x4 BH mesh instead
-#   HF_MODEL=meta-llama/Llama-3.1-8B-Instruct HF_TOKEN=hf_xxx ./run_demo.sh
 #   ./run_demo.sh --max_generated_tokens 64    # extra flags forwarded to pytest
 #   ./run_demo.sh --unit-only                  # skip the device demo, run unit tests
 
@@ -22,23 +20,11 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
 VENV_DIR="${VENV_DIR:-${REPO_ROOT}/python_env}"
 
 # --- Model / weights -------------------------------------------------------
-# Default to the locally-cached non-gated NousResearch mirror so no HF token
-# is needed. Prefer the local download dir (absolute path => HF hub is never
-# contacted); fall back to the org/name form, then to the gated Meta repo.
-LOCAL_WEIGHTS="${REPO_ROOT}/NousResearch/Meta-Llama-3.1-8B"
-if [[ -z "${HF_MODEL:-}" ]]; then
-    if [[ -f "${LOCAL_WEIGHTS}/config.json" ]]; then
-        HF_MODEL="${LOCAL_WEIGHTS}"
-    else
-        HF_MODEL="NousResearch/Meta-Llama-3.1-8B"
-    fi
-fi
+# Hardcoded to the Meta-Llama-3.1-8B weights bundled next to this script. An
+# absolute path means the HF hub is never contacted, so no HF token is needed.
+# See "Model weights" in README.md for how to download them.
+HF_MODEL="${SCRIPT_DIR}/NousResearch/Meta-Llama-3.1-8B"
 export HF_MODEL
-
-# HF_TOKEN is optional but required for gated repos (e.g. meta-llama/*).
-if [[ -n "${HF_TOKEN:-}" ]]; then
-    export HF_TOKEN
-fi
 
 # --- Device mesh -----------------------------------------------------------
 # Default to a single P150 chip. The fork's conftest.py flips fabric_config

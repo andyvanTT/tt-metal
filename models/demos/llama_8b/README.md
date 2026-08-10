@@ -40,9 +40,39 @@ subclasses because the changes are deep inside large methods (`forward_prefill`,
 Keeping the whole file avoids fragile partial-method overrides and makes
 rebases explicit.
 
-## Running the demo
+## Model weights
+
+The demo reads the **Meta-Llama-3.1-8B** weights from a local directory, so no
+HuggingFace token or network access is needed at run time. The weights are
+large (~22 GB) and are git-ignored via this directory's `.gitignore`
+(`NousResearch/`, `*.safetensors`) — never commit them.
+
+Download the non-gated NousResearch mirror into this directory:
 
 ```bash
+cd models/demos/llama_8b
+huggingface-cli download NousResearch/Meta-Llama-3.1-8B \
+    --local-dir NousResearch/Meta-Llama-3.1-8B
+```
+
+(Or point `HF_MODEL` at any existing local copy of the model.) The expected
+layout is `NousResearch/Meta-Llama-3.1-8B/{config.json, generation_config.json,
+model-0000X-of-00004.safetensors, tokenizer.json, ...}`.
+
+## Running the demo
+
+The easiest way is the bundled runner, which sets `HF_MODEL`, `MESH_DEVICE=P150`,
+activates the venv, and invokes pytest:
+
+```bash
+models/demos/llama_8b/run_demo.sh
+```
+
+To run pytest directly instead:
+
+```bash
+export HF_MODEL=models/demos/llama_8b/NousResearch/Meta-Llama-3.1-8B
+export MESH_DEVICE=P150
 pytest models/demos/llama_8b/demo/text_demo.py -k "Llama-3.1-8B-Instruct" \
     --max_seq_len 32768 --batch_size 1 --max_generated_tokens 32
 ```
